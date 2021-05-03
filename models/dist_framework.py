@@ -28,7 +28,7 @@ class DTGAE_Encoder(DDP):
         self.module.train(mode=mode)
 
     '''
-    Put different data on worker
+    Put different data on worker. Must be called before work can be done
     '''
     def load_new_data(self, loader, kwargs):
         print(rpc.get_worker_info().name + ": Reloading %d - %d" % (kwargs['start'], kwargs['end']))
@@ -69,7 +69,8 @@ class DTGAE_Encoder(DDP):
     Assumes zs are already adjusted so z[0] predicts edge[0]
     '''
     def score_edges(self, z, partition, nratio):
-        p,n = self.__get_neg_edges(z, partition, nratio)
+        p,n = self.module.data.get_negative_edges(partition, nratio)
+
         p_scores = []
         n_scores = []
 
@@ -102,12 +103,6 @@ class DTGAE_Encoder(DDP):
     '''
     def decode_all(self, zs):
         raise NotImplementedError
-
-    '''
-    Dependant on data object. Must be implimented by user
-    '''
-    def __get_neg_edges(self, z, partition, nratio):
-        raise NotImplementedError   
 
 
 '''
@@ -142,7 +137,7 @@ class DTGAE_Recurrent(nn.Module):
         zs = []
         for f in futs:
             z, h_0 = self.gru(
-                torch.tanh(f.wait()),
+                f.wait(),
                 h_0, include_h=True
             )
 
@@ -249,7 +244,7 @@ class DTGAE_Recurrent(nn.Module):
     Need to change which zs are given to workers depending on if 
     predictive or static
     '''
-    def score_all(self, zs, detailed=False):
+    def score_all(self, zs):
         raise NotImplementedError
 
     '''
@@ -268,8 +263,16 @@ class DTGAE_Recurrent(nn.Module):
 
 
 '''
-Abstract class for workers to follow. Requires that they have a method to load
-data in, and the forward method masks that data
+Demonstrates how forward must be called on embedding units 
+Data must live in the models, and must be masked via enums passed to them
 '''
-class DTGAE_Encoder(nn.Module):
-    def __init__(self, ) # TODO
+class DTGAE_Embed_Unit(nn.Module):
+    def __forward(self, mask_enum):
+        raise NotImplementedError
+
+    def forward(self, mask_enum, no_grad):
+        if no_grad:
+            with torch.no_grad():
+                return self.__forward(mask_enum)
+        
+        return self.__forward(mask_enum)
