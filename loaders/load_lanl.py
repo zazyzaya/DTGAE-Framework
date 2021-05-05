@@ -6,6 +6,7 @@ import torch
 from torch_geometric.data import Data 
 from tqdm import tqdm 
 
+from .tdata import TData
 from .load_utils import edge_tv_split
 
 DATE_OF_EVIL_LANL = 150885
@@ -84,13 +85,9 @@ def load_lanl_dist(workers, start=0, end=635015, delta=8640, is_test=False, ew_f
 
     # Just join all the lists from all the data objects
     print("Joining Data objects")
-    x = datas[0].x
+    x = datas[0].xs
     eis = data_reduce('eis')
     masks = data_reduce('masks')
-    te_starts = max([datas[i].te_starts for i in range(workers)])
-    num_nodes = datas[0].num_nodes
-    T = len(eis)
-    slices = data_reduce('slices')
     ews = data_reduce('ews')
     node_map = datas[0].node_map
 
@@ -105,72 +102,17 @@ def load_lanl_dist(workers, start=0, end=635015, delta=8640, is_test=False, ew_f
     # After everything is combined, wrap it in a fancy new object, and you're
     # on your way to coolsville flats
     print("Done")
-    return LANL_Data(
-        x=x, eis=eis, masks=masks, te_starts=te_starts, 
-        num_nodes=num_nodes, T=T, slices=slices, ys=ys,
-        ews=ews, node_map=node_map
+    return TData(
+        eis, x, ys, masks, ews=ews, node_map=node_map
     )
-
-    
+ 
 
 # wrapper bc its annoying to send kwargs with Parallel
 def load_partial_lanl_job(pid, args):
-    #print("%d: Building %d - %d" % (pid, args['start'], args['end']))
     data = load_partial_lanl(**args)
-    data.serialize()
     return data
 
-
-def mapper(**kwargs):
-    kwargs['ew_fn'] = lambda x : x 
-    kwargs['delta'] = 1e9 # Arbitrarilly large number 
-    return load_partial_lanl(**kwargs)
-
-'''
-Takes several data objects that have one timeslice each 
-and combine them into a bigger graph that is also one timeslice
-'''
-def reducer(datas, ew_fn=std_edge_w):
-    e_dict = {}
-
-    def add_edge(et, y, weight):
-        if et in e_dict:
-            val = e_dict[et]
-            e_dict[et] = (max(y, val[0]), val[1]+weight)
-        else:
-            e_dict[et] = (y, weight)
-
-    '''
-    In theory, could add another nested loop to account for 
-    data obj.s with multiple time slices, but the map fn should
-    make such an occurence difficult
-    '''
-    for d in datas:
-        ei = d.eis[0]
-        ys = d.ys[0]
-        ew = d.ews[0]
-
-        for i in range(ei.size(1)):
-            src, dst = ei[:, i]
-            add_edge(
-                (src.item(), dst.item()),
-                ys[i], ew[i]
-            )
-
-    ei = list(zip(*e_dict.keys()))
-    y,ew = list(zip(*e_dict.values()))
-    node_map = pickle.load(open(LANL_FOLDER+'nmap.pkl', 'rb'))
-                
-    return make_data_obj(
-        [ei], -1, ew_fn, 
-        slices=None,
-        ys=[y],
-        ews=[ew],
-        node_map=node_map
-    )
-
-
-def make_data_obj(eis, tr_set_partition_end, ew_fn, **kwargs):
+def make_data_obj(eis, ys, ew_fn, ews=None, **kwargs):
     # Known value for LANL
     cl_cnt = 17684
 
@@ -190,35 +132,30 @@ def make_data_obj(eis, tr_set_partition_end, ew_fn, **kwargs):
         else:
             feats[i][SPEC] = 1
 
-    x = feats
+    # That's not much info, so add in NIDs as well
+    x = torch.cat([feats, torch.eye(cl_cnt+1)], dim=1)
     
     # Build time-partitioned edge lists
     eis_t = []
-    splits = []
+    masks = []
 
     for i in range(len(eis)):
         ei = torch.tensor(eis[i])
         eis_t.append(ei)
-        
-        # Add val mask for all time slices in training set
-        if i < tr_set_partition_end:
-            splits.append(edge_tv_split(ei)[0])
+
+        # This is training data if no ys present
+        if isinstance(ys, None.__class__):
+            masks.append(edge_tv_split(ei)[0])
 
     # Balance the edge weights if they exist
-    if 'ews' in kwargs:
-        kwargs['ews'] = ew_fn(kwargs['ews'])
+    if not isinstance(ews, None.__class__):
+        ews = ew_fn(ews)
+
 
     # Finally, return Data object
-    data = LANL_Data(
-        x=x, 
-        eis=eis_t,
-        masks=splits,
-        te_starts=tr_set_partition_end,
-        num_nodes=cl_cnt,
-        T=len(eis),
-        **kwargs
+    return TData(
+        eis_t, x, ys, masks, ews=ews, node_map=nm
     )
-    return data
 
 '''
 Equivilant to load_cyber.load_lanl but uses the sliced LANL files 
@@ -233,7 +170,6 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
     ews = []
     edges_t = {}
     ys = []
-    times = []
 
     # Predefined for easier loading so everyone agrees on NIDs
     node_map = pickle.load(open(LANL_FOLDER+'nmap.pkl', 'rb'))
@@ -281,7 +217,6 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
     scan_prog = tqdm(desc='Finding start', total=start-cur_slice-1)
     prog = tqdm(desc='Seconds read', total=end-start-1)
 
-    anom_starts = 0
     anom_marked = False
     keep_reading = True
 
@@ -319,10 +254,9 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
                     ews.append(ew)
 
                     if is_test:
-                        ys.append(y)
+                        ys.append(torch.tensor(y))
 
                     edges_t = {}
-                    times.append(str(curtime) + '-' + str(ts-1))
 
                 # If the list was empty, just keep going if you can
                 curtime = ts 
@@ -359,37 +293,22 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
             in_f = open(LANL_FOLDER + str(cur_slice) + '.txt', 'r')
             line = in_f.readline()
         else:
+            keep_reading=False
             break
-    
-    in_f.close() 
     
     if is_test:
         rf.close() 
 
-    if not is_test:
-        anom_starts = len(edges)
-
     ys = ys if is_test else None
-    
-    tot_anoms = 0
-    if is_test:
-        for y in ys:
-            tot_anoms += sum(y)
 
     scan_prog.close()
     prog.close()
 
     return make_data_obj(
-        edges, 
-        anom_starts, 
-        ew_fn=ew_fn, 
-        slices=times,
-        ys=ys,
-        tot_anoms=tot_anoms,
-        ews=ews,
-        node_map=node_map
+        edges, ys, ew_fn,
+        ews=ews, node_map=node_map
     )
 
 if __name__ == '__main__':
-    data = load_partial_lanl(end=DATE_OF_EVIL_LANL-1)
+    data = load_lanl_dist(8, end=DATE_OF_EVIL_LANL-1)
     print(data)

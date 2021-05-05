@@ -1,0 +1,54 @@
+Delta: 2hrs, pred
+Learned Cutoff 0.5747TPR: 0.00, FPR: 6.84
+TP: 0  FP: 324336
+F1: 0.00000000
+
+Default Cutoff 0.5000
+TPR: 0.00, FPR: 0.00
+TP: 0  FP: 0
+F1: 0.00000000
+Delta: 2hrs, pred
+Learned Cutoff 0.6059TPR: 0.00, FPR: 7.13
+TP: 0  FP: 338413
+F1: 0.00000000
+
+Default Cutoff 0.5000
+TPR: 0.00, FPR: 0.02
+TP: 0  FP: 1093
+F1: 0.00000000
+Delta: 2hrs, pred
+Learned Cutoff 0.5756TPR: 0.00, FPR: 7.11
+TP: 0  FP: 337481
+F1: 0.00000000
+
+Default Cutoff 0.5000
+TPR: 0.00, FPR: 0.02
+TP: 0  FP: 813
+F1: 0.00000000
+Delta: 2hrs, pred
+Learned Cutoff 0.5522TPR: 0.00, FPR: 4.73
+TP: 0  FP: 224560
+F1: 0.00000000
+
+Default Cutoff 0.5000
+TPR: 0.00, FPR: 0.03
+TP: 0  FP: 1379
+F1: 0.00000000
+Delta: 2hrs, pred
+Learned Cutoff 0.5618TPR: 0.00, FPR: 6.75
+TP: 0  FP: 320289
+F1: 0.00000000
+
+Default Cutoff 0.5000
+TPR: 0.00, FPR: 0.01
+TP: 0  FP: 343
+F1: 0.00000000
+Delta: 2hrs, pred
+Learned Cutoff 0.5063TPR: 92.65, FPR: 2.69
+TP: 63  FP: 127671
+F1: 0.00098590
+
+Default Cutoff 0.5000
+TPR: 89.71, FPR: 2.53
+TP: 61  FP: 120105
+F1: 0.00101469

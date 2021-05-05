@@ -5,7 +5,7 @@ from torch import nn
 from torch.distributed import rpc 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from .utils import _remote_method, _remote_method_async, _param_rrefs
+from .dist_utils import _remote_method, _remote_method_async, _param_rrefs
 
 '''
 Wrapper class for the DDP class that holds the data this module will operate on
@@ -64,36 +64,13 @@ class DTGAE_Encoder(DDP):
 
         return (pos_loss + neg_loss) * 0.5
 
-    '''
-    Same as running calc loss in eval mode, but scores all nodes
-    Assumes zs are already adjusted so z[0] predicts edge[0]
-    '''
-    def score_edges(self, z, partition, nratio):
-        p,n = self.module.data.get_negative_edges(partition, nratio)
-
-        p_scores = []
-        n_scores = []
-
-        for i in range(len(z)):
-            p_scores.append(self.decode(p[i], z[i]))
-            n_scores.append(self.decode(n[i], z[i]))
-
-        p_scores = torch.cat(p_scores, dim=0)
-        n_scores = torch.cat(n_scores, dim=0)
-
-        return p_scores, n_scores
 
     '''
     Rather than sending edge index to master, calculate loss 
     on workers all at once 
     '''
     def calc_loss(self, z, partition, nratio):
-        # First get edge scores
-        p_scores, n_scores = self.score_edges(z, partition, nratio)
-
-        # Then run NL loss on them
-        return self.nll(p_scores, n_scores)
-
+        raise NotImplementedError
 
     '''
     Given node embeddings, return edge likelihoods for 
@@ -104,12 +81,19 @@ class DTGAE_Encoder(DDP):
     def decode_all(self, zs):
         raise NotImplementedError
 
+    
+    '''
+    Scores all known edges and randomly sampled non-edges
+    '''
+    def score_edges(self, z, partition, nratio):
+        raise NotImplementedError
+
 
 '''
 Abstract class for master module that holds all workers
 and calculates loss
 
-    rnn: An RNN-like module that accepts 4D tensors and outputs Bx1 tensors
+    rnn: An RNN-like module that accepts 4D tensors
     remote_rrefs: a list of RRefs to DTGAE_Workers
 
 '''
@@ -123,11 +107,14 @@ class DTGAE_Recurrent(nn.Module):
         self.num_workers = len(self.gcns)
         self.len_from_each = []
 
+        # Used for LR when classifying anomalies
+        self.cutoff = 0.5
+
 
     '''
     First have each worker encode their data, then run the embeddings through the RNN 
     '''
-    def forward(self, mask_enum, include_h=False, h_0=None, no_grad=False):
+    def forward(self, mask_enum, include_h=False, h0=None, no_grad=False):
         futs = self.encode(mask_enum, no_grad)
 
         # Run through RNN as embeddings come in 
@@ -136,20 +123,25 @@ class DTGAE_Recurrent(nn.Module):
         # workers with higher pids)
         zs = []
         for f in futs:
-            z, h_0 = self.gru(
+            z, h0 = self.rnn(
                 f.wait(),
-                h_0, include_h=True
+                h0, include_h=True
             )
 
             zs.append(z)
+        
+        #zs = [f.wait() for f in futs]
 
         # May as well do this every time, not super expensive
         self.len_from_each = [
             embed.size(0) for embed in zs
         ]
+        zs = torch.cat(zs, dim=0)
+
+        #zs, h0 = self.rnn(torch.cat(zs, dim=0), h0, include_h=True)
 
         if include_h:
-            return zs, h_0 
+            return zs, h0 
         else:
             return zs
 
@@ -185,9 +177,7 @@ class DTGAE_Recurrent(nn.Module):
                 )
             )
         
-        params.extend(_param_rrefs(self.gru))
-        params.extend(_param_rrefs(self.sig))
-        
+        params.extend(_param_rrefs(self.rnn))
         return params
 
     '''
@@ -267,12 +257,12 @@ Demonstrates how forward must be called on embedding units
 Data must live in the models, and must be masked via enums passed to them
 '''
 class DTGAE_Embed_Unit(nn.Module):
-    def __forward(self, mask_enum):
+    def inner_forward(self, mask_enum):
         raise NotImplementedError
 
     def forward(self, mask_enum, no_grad):
         if no_grad:
             with torch.no_grad():
-                return self.__forward(mask_enum)
+                return self.inner_forward(mask_enum)
         
-        return self.__forward(mask_enum)
+        return self.inner_forward(mask_enum)

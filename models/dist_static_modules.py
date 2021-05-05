@@ -1,31 +1,35 @@
 import torch 
 from torch import nn 
-from torch_geometric.nn import GCNConv
+from torch.distributed import rpc 
+from torch_geometric.nn import GCNConv, GATConv
 
 from .dist_framework import DTGAE_Embed_Unit
-from .dist_static_framework import StaticEncoder, StaticRecurrent
+from .dist_static import StaticEncoder
 
 class StaticGCN(DTGAE_Embed_Unit):
-    def __init__(self, x_dim, h_dim, z_dim):
+    def __init__(self, data_load, data_kws, h_dim, z_dim):
         super(StaticGCN, self).__init__()
 
+        # Load in the data before initing params
+        print("%s loading %d-%d" % (
+            rpc.get_worker_info().name, 
+            data_kws['start'], 
+            data_kws['end'])
+        )
+
+        self.data = data_load(data_kws.pop("jobs"), **data_kws)
+
         # Params 
-        self.c1 = GCNConv(x_dim, h_dim, add_self_loops=True)
+        self.c1 = GCNConv(self.data.x_dim, h_dim, add_self_loops=True)
         self.relu = nn.ReLU()
         self.c2 = GCNConv(h_dim, z_dim, add_self_loops=True)
         self.drop = nn.Dropout(0.25)
         self.tanh = nn.Tanh()
-
-        # Must be loaded before running model
-        self.data = None 
     
     '''
-    Override parent's abstract __forward method
+    Override parent's abstract inner_forward method
     '''
-    def __forward(self, mask_enum):
-        assert not isinstance(self.data, None),\
-            "Must load data onto workers before calling forward"
-
+    def inner_forward(self, mask_enum):
         zs = []
         for i in range(self.data.T):
             zs.append(self.forward_once(mask_enum, i))
@@ -53,3 +57,17 @@ class StaticGCN(DTGAE_Embed_Unit):
 
         # Experiments have shown this is the best activation for GCN+GRU
         return self.tanh(x)
+
+
+def static_gcn_rref(loader, kwargs, h_dim, z_dim):
+    return StaticEncoder(
+        StaticGCN(loader, kwargs, h_dim, z_dim)
+    )
+
+
+class StaticGAT(StaticGCN):
+    def __init__(self, data_load, data_kws, h_dim, z_dim, heads=3):
+        super().__init__(data_load, data_kws, h_dim, z_dim)
+
+        self.c1 = GATConv(self.data.x_dim, h_dim, heads=heads)
+        self.c2 = GATConv(h_dim*heads, z_dim, concat=False)
