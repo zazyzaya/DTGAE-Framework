@@ -17,6 +17,13 @@ RED_LOG = '/mnt/raid0_24TB/datasets/LANL_2015/data_files/redteam.txt'
 COMP = 0
 USR = 1
 SPEC = 2
+X_DIM = 17688
+
+torch.set_num_threads(1)
+
+def empty_lanl():
+    return make_data_obj([],None,None)
+
 
 '''
  Build balanced edge weights between [0,1]
@@ -48,12 +55,20 @@ def normalized(ew_ts):
     return ews
 
 def load_lanl_dist(workers, start=0, end=635015, delta=8640, is_test=False, ew_fn=std_edge_w):
+    if start == None or end == None:
+        return empty_lanl()
+
+    num_slices = ((end - start) // delta)
+    remainder = (end-start) % delta
+    num_slices = num_slices + 1 if remainder else num_slices
+    workers = min(num_slices, workers)
+
+    # Can't distribute the job if not enough workers
     if workers <= 1:
         return load_partial_lanl(start, end, delta, is_test, ew_fn)
 
-    num_slices = ((end - start) // delta) + 1 
     per_worker = [num_slices // workers] * workers 
-    remainder = num_slices % workers 
+    remainder = num_slices % workers
 
     # Give everyone a balanced number of tasks 
     # put remainders on last machines as last task 
@@ -310,5 +325,5 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
     )
 
 if __name__ == '__main__':
-    data = load_lanl_dist(8, end=DATE_OF_EVIL_LANL-1)
+    data = load_lanl_dist(2, start=0, end=21600, delta=21600)
     print(data)

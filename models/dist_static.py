@@ -127,14 +127,13 @@ class StaticRecurrent(DTGAE_Recurrent):
             )
             start = end 
 
-        '''
         tot_loss = torch.zeros(1)
         for f in futs:
             tot_loss += f.wait()
 
-        return tot_loss.true_divide(sum(self.len_from_each))
-        '''
-        return [f.wait() for f in futs]
+        return [tot_loss.true_divide(sum(self.len_from_each))]
+
+        #return [f.wait() for f in futs]
 
     '''
     Gets edge scores from dist modules, and negative edges

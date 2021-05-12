@@ -16,41 +16,26 @@ from models.dist_static import StaticEncoder, StaticRecurrent
 from models.dist_utils import _remote_method_async, _remote_method
 from models.dist_static_modules import static_gcn_rref
 from models.recurrent import GRU 
-from utils import get_score, get_optimal_cutoff
+from utils import get_score, get_optimal_cutoff, get_f1
 
 DEFAULTS = {
-    'h_size': 32, 
-    'z_size': 16,
-    'lr': 0.01,
+    'lr': 0.001,
     'epochs': 1500,
-    'min': 5,
+    'min': 1,
     'patience': 5,
-    'n_gru': 1,
-    'nratio': 10,
+    'nratio': 1,
     'val_nratio': 1,
-    'delta': 2
 }
+
+# Defaults
+WORKER_ARGS = [32,32]
+RNN_ARGS = [32,32,16,1]
 
 WORKERS=4
 W_THREADS=2
 M_THREADS=1
 
-DELTA=int((60**2) * DEFAULTS['delta'])
-TR_START=0
-TR_END=ld.DATE_OF_EVIL_LANL-DELTA*2
-
-val = (TR_END - TR_START) // 20
-VAL_START = TR_END-val
-VAL_END = TR_END
-TR_END = VAL_START
-
-TE_START=ld.DATE_OF_EVIL_LANL
-#TE_END = 228642 # First 20 anoms
-TE_END = 740104 # First 100 anoms
-#TE_END = 1089597 # First 500 anoms
-#TE_END = 5011200 # Full
-
-TE_DELTA=DELTA
+TMP_FILE = 'tmp.dat'
 
 torch.set_num_threads(1)
 
@@ -72,6 +57,13 @@ def get_work_units(num_workers, start, end, delta, isTe):
         for i in range(num_workers, num_workers-remainder, -1):
             per_worker[i-1]+=1 
 
+    '''
+    # Only uncomment when running late at night
+    # Don't be a thread-hog, fucko
+    global W_THREADS
+    W_THREADS = W_THREADS*2 if isTe else W_THREADS
+    '''
+
     print("Tasks: %s" % str(per_worker))
     kwargs = []
     prev = start
@@ -89,7 +81,7 @@ def get_work_units(num_workers, start, end, delta, isTe):
     return kwargs
     
 
-def init_workers(num_workers, h_dim, start, end, delta, isTe):
+def init_workers(num_workers, start, end, delta, isTe, worker_constructor, worker_args):
     kwargs = get_work_units(num_workers, start, end, delta, isTe)
 
     rrefs = []
@@ -97,14 +89,29 @@ def init_workers(num_workers, h_dim, start, end, delta, isTe):
         rrefs.append(
             rpc.remote(
                 'worker'+str(i),
-                static_gcn_rref,
-                args=(ld.load_lanl_dist, kwargs[i], h_dim, h_dim)
+                worker_constructor,
+                args=(ld.load_lanl_dist, kwargs[i], *worker_args)
             )
         )
 
     return rrefs
 
-def init_procs(rank, world_size, tr_args=DEFAULTS):
+def init_empty_workers(num_workers, worker_constructor, worker_args):
+    empty = {'jobs': 0, 'start': None, 'end': None}
+    
+    rrefs = [
+        rpc.remote(
+            'worker'+str(i),
+            worker_constructor,
+            args=(ld.load_lanl_dist, empty, *worker_args)
+        )
+        for i in range(num_workers)
+    ]
+
+    return rrefs
+
+def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, worker_args, 
+                times, just_test, fw, tr_args=DEFAULTS):
     # DDP info
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '42069'
@@ -128,14 +135,34 @@ def init_procs(rank, world_size, tr_args=DEFAULTS):
             rpc_backend_options=rpc_backend_options
         )
 
-        rrefs = init_workers(
-            world_size-1, tr_args['h_size'], 
-            TR_START, TR_END, DELTA, False
-        )
+        if not just_test:
+            rrefs = init_workers(
+                world_size-1, 
+                times['tr_start'], times['tr_end'], times['delta'], False,
+                worker_constructor, worker_args
+            )
 
-        model, zs, h0 = train(rrefs, tr_args)
-        get_cutoff(model, h0, tr_args)
-        test(model, zs, h0, rrefs, tr_args)
+            model, h0, tpe = train(rrefs, tr_args, rnn_constructor, rnn_args)
+
+        else:
+            # TODO make it possible to construct rrefs without
+            # loading data
+            rrefs = init_empty_workers(
+                world_size-1, 
+                worker_constructor, worker_args
+            )
+
+            rnn = rnn_constructor(*rnn_args)
+            model = StaticRecurrent(rnn, rrefs)
+
+            states = pickle.load(open('model_save.pkl', 'rb'))
+            model.load_states(states['gcn'], states['rnn'])
+            h0 = states['h0']
+            tpe = 0
+
+        h0 = get_cutoff(model, h0, times, tr_args, fw)
+        stats = test(model, h0, times, rrefs)
+        stats['TPE'] = tpe
 
     # Slaves
     else:
@@ -160,9 +187,13 @@ def init_procs(rank, world_size, tr_args=DEFAULTS):
     # Block until all procs complete
     rpc.shutdown()
 
+    # Write output to a tmp file to get it back to the parent process
+    if rank == world_size-1:
+        pickle.dump(stats, open(TMP_FILE, 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
 
-def train(rrefs, kwargs):
-    rnn = GRU(kwargs['h_size'], kwargs['h_size'], kwargs['z_size'], kwargs['n_gru'])
+
+def train(rrefs, kwargs, rnn_constructor, rnn_args):
+    rnn = rnn_constructor(*rnn_args)
     model = StaticRecurrent(rnn, rrefs)
 
     opt = DistributedOptimizer(
@@ -198,7 +229,8 @@ def train(rrefs, kwargs):
             p,n = model.score_edges(zs, TData.VAL)
             auc,ap = get_score(p,n)
 
-            print("\tValidation: AP: %0.4f  AUC: %0.4f" % (ap, auc), end='')
+            print("\tValidation: AP: %0.4f  AUC: %0.4f" 
+                % (ap, auc), end='')
             tot = ap+auc
 
             if tot > best[1]:
@@ -217,30 +249,31 @@ def train(rrefs, kwargs):
     model.load_states(best[0][0], best[0][1])
     zs, h0 = model(TData.TEST, include_h=True)
 
-    states = {'gcn': best[0][0], 'rnn': best[0][1]}
+    states = {'gcn': best[0][0], 'rnn': best[0][1], 'h0': h0}
     f = open('model_save.pkl', 'wb+')
     pickle.dump(states, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+    tpe = sum(times)/len(times)
     print("Exiting train loop")
-    print("Avg TPE: %0.4fs" % (sum(times)/len(times)) )
+    print("Avg TPE: %0.4fs" % tpe)
     
-    return model, zs[-1], h0
+    return model, h0, tpe
 
 
 '''
 Given a trained model, generate the optimal cutoff point using
 the validation data
 '''
-def get_cutoff(model, h0, kwargs):
+def get_cutoff(model, h0, times, kwargs, fw):
     # First load validation data onto one of the GCNs
     _remote_method(
         StaticEncoder.load_new_data,
         model.gcns[0],
         ld.load_lanl_dist,
         {
-            'start': VAL_START,
-            'end': VAL_END,
-            'delta': DELTA,
+            'start': times['tr_end'],
+            'end': times['val_end'],
+            'delta': times['delta'],
             'jobs': 2,
             'is_test': False
         }
@@ -257,7 +290,7 @@ def get_cutoff(model, h0, kwargs):
 
     # Finally, generate actual embeds
     with torch.no_grad():
-        zs = model.rnn(zs, h0)
+        zs, h0 = model.rnn(zs, h0, include_h=True)
 
     # Then score them
     p,n = _remote_method(
@@ -268,14 +301,21 @@ def get_cutoff(model, h0, kwargs):
     )
 
     # Finally, figure out the optimal cutoff score
-    model.cutoff = get_optimal_cutoff(p,n,fw=0.6)
+    model.cutoff = get_optimal_cutoff(p,n,fw=fw)
     print()
+    return h0
 
 
-def test(model, zs, h0, rrefs, kwargs):
+def test(model, h0, times, rrefs):
     # Load train data into workers
-    ld_args = get_work_units(len(rrefs), TE_START, TE_END, DELTA, True)
-    
+    ld_args = get_work_units(
+        len(rrefs), 
+        times['val_end'], 
+        times['te_end'],
+        times['delta'], 
+        True
+    )
+
     print("Loading test data")
     futs = [
         _remote_method_async(
@@ -291,12 +331,13 @@ def test(model, zs, h0, rrefs, kwargs):
 
     with torch.no_grad():
         model.eval()
+        s = time.time()
         zs = model(TData.TEST, h0=h0, no_grad=True)
+        ctime = time.time()-s
 
     # Scores all edges and matches them with name/timestamp
     print("Scoring")
     scores, labels = model.score_all(zs)
-
     anoms = scores[labels==1].sort()[0]
 
     # Classify using cutoff from earlier
@@ -312,53 +353,99 @@ def test(model, zs, h0, rrefs, kwargs):
     tp = classified[labels==1].sum()
     fp = classified[labels==0].sum()
     
-    fn = (labels==1).sum() - tp
-    f1 = tp / (tp + 0.5*(fp + fn))
+    f1 = get_f1(classified, labels)
 
-    dtpr = default[labels==1].mean() * 100
-    dfpr = default[labels==0].mean() * 100
-    
-    dtp = default[labels==1].sum()
-    dfp = default[labels==0].sum()
-    
-    dfn = (labels==1).sum() - dtp
-    df1 = dtp / (dtp + 0.5*(dfp + dfn))
+    auc,ap = get_score(scores[labels==0], scores[labels==1])
 
     print("Learned Cutoff %0.4f" % model.cutoff)
     print("TPR: %0.2f, FPR: %0.2f" % (tpr, fpr))
     print("TP: %d  FP: %d" % (tp, fp))
-    print("F1: %0.8f\n" % f1)
-
-    print("Default Cutoff %0.4f" % 0.5)
-    print("TPR: %0.2f, FPR: %0.2f" % (dtpr, dfpr))
-    print("TP: %d  FP: %d" % (dtp, dfp))
-    print("F1: %0.8f\n" % df1)
+    print("F1: %0.8f" % f1)
+    print("AUC: %0.4f  AP: %0.4f\n" % (auc,ap))
 
     print("Top anom scored %0.04f" % anoms[0].item())
     print("Lowest anom scored %0.4f" % anoms[-1].item())
     print("Mean anomaly score: %0.4f" % anoms.mean().item())
 
-    with open('out.txt', 'a') as f:
-        f.write("Delta: %shrs, pred\n" % kwargs['delta'])
-        f.write("Learned Cutoff %0.4f" % model.cutoff)
-        f.write("TPR: %0.2f, FPR: %0.2f\n" % (tpr, fpr))
-        f.write("TP: %d  FP: %d\n" % (tp, fp))
-        f.write("F1: %0.8f\n\n" % f1)
+    return {
+        'TPR':tpr.item(), 
+        'FPR':fpr.item(), 
+        'TP':tp.item(), 
+        'FP':fp.item(), 
+        'F1':f1.item(), 
+        'AUC':auc, 
+        'AP': ap,
+        'FwdTime':ctime
+    }
 
-        f.write("Default Cutoff %0.4f\n" % 0.5)
-        f.write("TPR: %0.2f, FPR: %0.2f\n" % (dtpr, dfpr))
-        f.write("TP: %d  FP: %d\n" % (dtp, dfp))
-        f.write("F1: %0.8f\n" % df1)
 
+def run_all(workers, rnn_constructor, rnn_args, worker_constructor, 
+            worker_args, delta, just_test, fw, 
+            te_end=None):
+    '''
+    Starts up proceses, trains validates and tests the model given 
+    the inputs 
 
-if __name__ == '__main__':
-    max_workers = (TR_END-TR_START) // DELTA 
-    workers = min(max_workers, WORKERS)
+        workers: how many worker processes to use
+        rnn_constructor: constructor for StaticRNN model
+        rnn_args: list of arguments for static rnn model
+        worker_constructor: constructs StaticDDP wrapped RRef to worker
+        worker_args: non-file loading related worker arguments
+        delta=None : size of time window in hours to partition graphs
+        te_end=None: how much test data to load. By default stops after first 
+                    100 anomalous edges are loaded
+    '''
 
+    # Convert to hours
+    delta = int(60**2 * delta)
+
+    tr_start=0
+    tr_end=ld.DATE_OF_EVIL_LANL
+    val = (tr_end - tr_start) // 20
+    val_start = tr_end-val
+    val_end = tr_end
+    tr_end = val_start
+
+    if not te_end:
+        #te_end = 228642 # First 20 anoms
+        #te_end = 740104 # First 100 anoms
+        #te_end = 1089597 # First 500 anoms
+        te_end = 5011199  # Full
+
+    max_workers = (tr_end-tr_start) // delta
+    workers = min(max_workers, workers)
+
+    times = {
+        'tr_start': tr_start,
+        'tr_end': tr_end,
+        'val_end': val_end,
+        'te_end': te_end,
+        'delta': delta
+    }
+
+    # Start workers
     world_size = workers+1
     mp.spawn(
         init_procs,
-        args=(world_size,),
+        args=(
+            world_size, 
+            rnn_constructor, 
+            rnn_args, 
+            worker_constructor, 
+            worker_args,
+            times,
+            just_test,
+            fw
+        ),
         nprocs=world_size,
         join=True
     )
+
+    # Retrieve stats, and cleanup temp file
+    stats = pickle.load(open(TMP_FILE, 'rb'))
+    os.remove(TMP_FILE)
+
+    return stats
+
+if __name__ == '__main__':
+    run_all(WORKERS, GRU, RNN_ARGS, static_gcn_rref, WORKER_ARGS, 2.0, False, 0.6)
