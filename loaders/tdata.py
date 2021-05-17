@@ -65,10 +65,10 @@ class TData(Data):
             else self.ews[t][~self.masks[t]]
 
     
-    def get_negative_edges(self, enum, nratio=1):
+    def get_negative_edges(self, enum, nratio=1, start=0):
         negs = []
         
-        for t in range(self.T):
+        for t in range(start, self.T):
             if enum == self.TRAIN:
                 pos = self.ei_masked(enum, t)
             else:

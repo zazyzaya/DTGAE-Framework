@@ -12,9 +12,11 @@ from torch.optim import Adam
 
 import loaders.load_lanl as ld
 from loaders.tdata import TData
+from models.dist_framework import DTGAE_Encoder, DTGAE_Recurrent
 from models.dist_static import StaticEncoder, StaticRecurrent 
+from models.dist_dynamic import DynamicEncoder, DynamicRecurrent
 from models.dist_utils import _remote_method_async, _remote_method
-from models.dist_static_modules import static_gcn_rref
+from models.embedders import static_gcn_rref
 from models.recurrent import GRU 
 from utils import get_score, get_optimal_cutoff, get_f1
 
@@ -57,12 +59,10 @@ def get_work_units(num_workers, start, end, delta, isTe):
         for i in range(num_workers, num_workers-remainder, -1):
             per_worker[i-1]+=1 
 
-    '''
     # Only uncomment when running late at night
     # Don't be a thread-hog, fucko
     global W_THREADS
     W_THREADS = W_THREADS*2 if isTe else W_THREADS
-    '''
 
     print("Tasks: %s" % str(per_worker))
     kwargs = []
@@ -90,7 +90,8 @@ def init_workers(num_workers, start, end, delta, isTe, worker_constructor, worke
             rpc.remote(
                 'worker'+str(i),
                 worker_constructor,
-                args=(ld.load_lanl_dist, kwargs[i], *worker_args)
+                args=(ld.load_lanl_dist, kwargs[i], *worker_args),
+                kwargs={'head': i==0}
             )
         )
 
@@ -103,7 +104,8 @@ def init_empty_workers(num_workers, worker_constructor, worker_args):
         rpc.remote(
             'worker'+str(i),
             worker_constructor,
-            args=(ld.load_lanl_dist, empty, *worker_args)
+            args=(ld.load_lanl_dist, empty, *worker_args),
+            kwargs={'head': i==0}
         )
         for i in range(num_workers)
     ]
@@ -111,7 +113,7 @@ def init_empty_workers(num_workers, worker_constructor, worker_args):
     return rrefs
 
 def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, worker_args, 
-                times, just_test, fw, tr_args=DEFAULTS):
+                times, just_test, fw, static, tr_args=DEFAULTS):
     # DDP info
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '42069'
@@ -142,7 +144,7 @@ def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, 
                 worker_constructor, worker_args
             )
 
-            model, h0, tpe = train(rrefs, tr_args, rnn_constructor, rnn_args)
+            model, h0, tpe = train(rrefs, tr_args, rnn_constructor, rnn_args, static)
 
         else:
             # TODO make it possible to construct rrefs without
@@ -153,7 +155,8 @@ def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, 
             )
 
             rnn = rnn_constructor(*rnn_args)
-            model = StaticRecurrent(rnn, rrefs)
+            model = StaticRecurrent(rnn, rrefs) if static\
+                else DynamicRecurrent(rnn, rrefs)
 
             states = pickle.load(open('model_save.pkl', 'rb'))
             model.load_states(states['gcn'], states['rnn'])
@@ -192,9 +195,10 @@ def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, 
         pickle.dump(stats, open(TMP_FILE, 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def train(rrefs, kwargs, rnn_constructor, rnn_args):
+def train(rrefs, kwargs, rnn_constructor, rnn_args, static):
     rnn = rnn_constructor(*rnn_args)
-    model = StaticRecurrent(rnn, rrefs)
+    model = StaticRecurrent(rnn, rrefs) if static \
+        else DynamicRecurrent(rnn, rrefs)
 
     opt = DistributedOptimizer(
         Adam, model.parameter_rrefs(), lr=kwargs['lr']
@@ -265,9 +269,14 @@ Given a trained model, generate the optimal cutoff point using
 the validation data
 '''
 def get_cutoff(model, h0, times, kwargs, fw):
+    # Weirdly, calling the parent class' method doesn't work
+    # whatever. This is a hacky solution, but it works
+    Encoder = StaticEncoder if isinstance(model, StaticRecurrent) \
+        else DynamicEncoder
+
     # First load validation data onto one of the GCNs
     _remote_method(
-        StaticEncoder.load_new_data,
+        Encoder.load_new_data,
         model.gcns[0],
         ld.load_lanl_dist,
         {
@@ -282,7 +291,7 @@ def get_cutoff(model, h0, times, kwargs, fw):
     # Then generate GCN embeds
     model.eval()
     zs = _remote_method(
-        StaticEncoder.forward,
+        Encoder.forward,
         model.gcns[0], 
         TData.ALL,
         True
@@ -294,7 +303,7 @@ def get_cutoff(model, h0, times, kwargs, fw):
 
     # Then score them
     p,n = _remote_method(
-        StaticEncoder.score_edges, 
+        Encoder.score_edges, 
         model.gcns[0],
         zs, TData.ALL,
         kwargs['val_nratio']
@@ -307,10 +316,16 @@ def get_cutoff(model, h0, times, kwargs, fw):
 
 
 def test(model, h0, times, rrefs):
+    # For whatever reason, it doesn't know what to do if you call
+    # the parent object's methods. Kind of defeats the purpose of 
+    # using OOP at all IMO, but whatever
+    Encoder = StaticEncoder if isinstance(model, StaticRecurrent) \
+        else DynamicEncoder
+
     # Load train data into workers
     ld_args = get_work_units(
         len(rrefs), 
-        times['val_end'], 
+        times['te_start'], 
         times['te_end'],
         times['delta'], 
         True
@@ -319,7 +334,7 @@ def test(model, h0, times, rrefs):
     print("Loading test data")
     futs = [
         _remote_method_async(
-            StaticEncoder.load_new_data,
+            Encoder.load_new_data,
             rrefs[i], 
             ld.load_lanl_dist, 
             ld_args[i]
@@ -380,7 +395,7 @@ def test(model, h0, times, rrefs):
 
 
 def run_all(workers, rnn_constructor, rnn_args, worker_constructor, 
-            worker_args, delta, just_test, fw, 
+            worker_args, delta, just_test, fw, static,
             te_end=None):
     '''
     Starts up proceses, trains validates and tests the model given 
@@ -401,9 +416,12 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
 
     tr_start=0
     tr_end=ld.DATE_OF_EVIL_LANL
-    val = (tr_end - tr_start) // 20
+    
+    # Need at least 2 deltas; default to 5% of tr data if that's enough
+    val = max((tr_end - tr_start) // 20, delta*2)
     val_start = tr_end-val
     val_end = tr_end
+    
     tr_end = val_start
 
     if not te_end:
@@ -415,10 +433,16 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
     max_workers = (tr_end-tr_start) // delta
     workers = min(max_workers, workers)
 
+    # Let timesteps overlap for dynamic as it never
+    # runs loss on the last time step during training
+    te_start = val_end if static \
+        else val_end - delta
+
     times = {
         'tr_start': tr_start,
         'tr_end': tr_end,
         'val_end': val_end,
+        'te_start': te_start,
         'te_end': te_end,
         'delta': delta
     }
@@ -435,7 +459,8 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
             worker_args,
             times,
             just_test,
-            fw
+            fw,
+            static
         ),
         nprocs=world_size,
         join=True
@@ -448,4 +473,4 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
     return stats
 
 if __name__ == '__main__':
-    run_all(WORKERS, GRU, RNN_ARGS, static_gcn_rref, WORKER_ARGS, 2.0, False, 0.6)
+    run_all(WORKERS, GRU, RNN_ARGS, static_gcn_rref, WORKER_ARGS, 2.0, False, 0.6, True)

@@ -5,22 +5,23 @@ from torch_geometric.nn import GCNConv, GATConv, SAGEConv
 
 from .dist_framework import DTGAE_Embed_Unit
 from .dist_static import StaticEncoder
+from .dist_dynamic import DynamicEncoder
 
-class StaticGCN(DTGAE_Embed_Unit):
+class GCN(DTGAE_Embed_Unit):
     def __init__(self, data_load, data_kws, h_dim, z_dim):
-        super(StaticGCN, self).__init__()
+        super(GCN, self).__init__()
 
-        if data_load:
-            # Load in the data before initing params
-            print("%s loading %s-%s" % (
-                rpc.get_worker_info().name, 
-                str(data_kws['start']), 
-                str(data_kws['end']))
-            )
+        # Load in the data before initing params
+        # Note: passing None as the start or end data_kw skips the 
+        # actual loading part, and just pulls the x-dim 
+        print("%s loading %s-%s" % (
+            rpc.get_worker_info().name, 
+            str(data_kws['start']), 
+            str(data_kws['end']))
+        )
 
-            self.data = data_load(data_kws.pop("jobs"), **data_kws)
-        else:
-            self.data = None
+        self.data = data_load(data_kws.pop("jobs"), **data_kws)
+        
 
         # Params 
         self.c1 = GCNConv(self.data.x_dim, h_dim, add_self_loops=True)
@@ -29,10 +30,11 @@ class StaticGCN(DTGAE_Embed_Unit):
         self.drop = nn.Dropout(0.25)
         self.tanh = nn.Tanh()
     
-    '''
-    Override parent's abstract inner_forward method
-    '''
+    
     def inner_forward(self, mask_enum):
+        '''
+        Override parent's abstract inner_forward method
+        '''
         zs = []
         for i in range(self.data.T):
             # Small optimization. Running each loop step as its own thread
@@ -44,11 +46,12 @@ class StaticGCN(DTGAE_Embed_Unit):
 
         return torch.stack([torch.jit._wait(z) for z in zs])
 
-    '''
-    Helper function to make __forward a little more readable 
-    Just passes each time step through a 2-layer GCN with final tanh activation
-    '''
+    
     def forward_once(self, mask_enum, i):
+        '''
+        Helper function to make inner_forward a little more readable 
+        Just passes each time step through a 2-layer GCN with final tanh activation
+        '''
         if self.data.dynamic_feats:
             x = self.data.xs[i]
         else:
@@ -67,13 +70,19 @@ class StaticGCN(DTGAE_Embed_Unit):
         return self.tanh(x)
 
 
-def static_gcn_rref(loader, kwargs, h_dim, z_dim):
+# Added dummy **kws param so we can use the same constructor for dynamic
+def static_gcn_rref(loader, kwargs, h_dim, z_dim, **kws):
     return StaticEncoder(
-        StaticGCN(loader, kwargs, h_dim, z_dim)
+        GCN(loader, kwargs, h_dim, z_dim)
+    )
+
+def dynamic_gcn_rref(loader, kwargs, h_dim, z_dim, head=False):
+    return DynamicEncoder(
+        GCN(loader, kwargs, h_dim, z_dim), head
     )
 
 
-class StaticGAT(StaticGCN):
+class GAT(GCN):
     def __init__(self, data_load, data_kws, h_dim, z_dim, heads=3):
         super().__init__(data_load, data_kws, h_dim, z_dim)
 
@@ -98,22 +107,33 @@ class StaticGAT(StaticGCN):
         return self.tanh(x)
 
 
-def static_gat_rref(loader, kwargs, h_dim, z_dim):
+def static_gat_rref(loader, kwargs, h_dim, z_dim, **kws):
     return StaticEncoder(
-        StaticGAT(loader, kwargs, h_dim, z_dim)
+        GAT(loader, kwargs, h_dim, z_dim)
     )
+
+def dynamic_gat_rref(loader, kwargs, h_dim, z_dim, head=False):
+    return DynamicEncoder(
+        GAT(loader, kwargs, h_dim, z_dim), head
+    )
+
 
 '''
 Inherits from GAT because also doesn't use edge weights
 '''
-class StaticSAGE(StaticGAT):
+class SAGE(GAT):
     def __init__(self, data_load, data_kws, h_dim, z_dim):
         super().__init__(data_load, data_kws, h_dim, z_dim)
 
         self.c1 = SAGEConv(self.data.x_dim, h_dim)
         self.c2 = SAGEConv(h_dim, h_dim)
 
-def static_sage_rref(loader, kwargs, h_dim, z_dim):
+def static_sage_rref(loader, kwargs, h_dim, z_dim, **kws):
     return StaticEncoder(
-        StaticSAGE(loader, kwargs, h_dim, z_dim)
+        SAGE(loader, kwargs, h_dim, z_dim)
+    )
+
+def dynamic_sage_rref(loader, kwargs, h_dim, z_dim, head=False):
+    return DynamicEncoder(
+        SAGE(loader, kwargs, h_dim, z_dim), head
     )

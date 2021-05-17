@@ -3,8 +3,11 @@ from argparse import ArgumentParser
 import pandas as pd
 
 from models.recurrent import GRU, LSTM 
-from models.dist_static_modules import static_gcn_rref, static_gat_rref, static_sage_rref
-from spinup_static import run_all
+from models.embedders import \
+    static_gcn_rref, static_gat_rref, static_sage_rref, \
+    dynamic_gcn_rref, dynamic_gat_rref, dynamic_sage_rref
+
+from spinup import run_all
 
 HOME = '/mnt/raid0_24TB/isaiah/code/DTGAE/'
 def get_args():
@@ -79,6 +82,11 @@ def get_args():
         action='store_true'
     )
 
+    ap.add_argument(
+        '--pred', '-p',
+        action='store_true'
+    )
+
 
     args = ap.parse_args()
     assert args.fpweight >= 0 and args.fpweight <=1, '--fpweight must be a value between 0 and 1 (inclusive)'
@@ -86,13 +94,18 @@ def get_args():
     readable = str(args)
     print(readable)
 
+    static = not args.pred
+
     # Convert from str to function pointer
     if args.encoder == 'GCN':
-        args.encoder = static_gcn_rref
+        args.encoder = static_gcn_rref if static \
+            else dynamic_gcn_rref
     elif args.encoder == 'GAT':
-        args.encoder = static_gat_rref
+        args.encoder = static_gat_rref if static \
+            else dynamic_gat_rref
     else:
-        args.encoder = static_sage_rref
+        args.encoder = static_sage_rref if static \
+            else dynamic_sage_rref
 
     if args.rnn == 'GRU':
         args.rnn = GRU
@@ -117,6 +130,7 @@ if __name__ == '__main__':
             args.delta,
             args.load,
             args.fpweight,
+            not args.pred
         )
         for _ in range(args.tests)
     ]
