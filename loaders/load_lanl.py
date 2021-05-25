@@ -324,6 +324,142 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
         ews=ews, node_map=node_map
     )
 
+def load_edge_list_dist(workers, start, end):
+    if workers <= 1:
+        return load_edge_list(start,end)
+    
+    job_size = (end-start) // workers
+
+    args = []
+    prev = start 
+    for _ in range(workers-1):
+        end_t = prev + job_size
+        args.append((prev, end_t))
+        prev = end_t
+    
+    # In case there's a remainder
+    args.append((prev,end))
+    
+    # Now start the jobs in parallel 
+    datas = Parallel(n_jobs=workers, prefer='processes')(
+        delayed(load_edge_list)(*args[i]) for i in range(workers)
+    )
+
+    # Then join all the individual lists back together
+    # (the order doesn't matter as long as ys[i] maps to eis[i])
+    eis, ys = list(zip(*datas))
+    return torch.cat(eis, dim=1), torch.cat(ys)
+
+'''
+Does no processing, just loads a list of edges for testing single embeddings
+(Should have a more accurate F1 score)
+'''
+def load_edge_list(start, end):
+    cur_slice = start - (start % FILE_DELTA)
+    start_f = str(cur_slice) + '.txt'
+    in_f = open(LANL_FOLDER + start_f, 'r')
+
+    srcs = []
+    dsts = []
+    ys = []
+
+    # Predefined for easier loading so everyone agrees on NIDs
+    node_map = pickle.load(open(LANL_FOLDER+'nmap.pkl', 'rb'))
+
+    # Helper functions (trims the trailing \n)
+    fmt_line = lambda x : (int(x[0]), int(x[1]), int(x[2][:-1]))
+    def get_next_anom(rf):
+        line = rf.readline().split(',')
+        
+        # Check we haven't reached EOF
+        if len(line) > 1:
+            return (int(line[0]), line[2], line[3])
+        else:
+            return float('inf'), float('inf'), float('inf')
+
+    def is_anomalous(src, dst, anom):
+        src = node_map[src]
+        dst = node_map[dst]
+        return src==anom[1] and dst==anom[2][:-1]
+
+    
+    rf = open(RED_LOG, 'r')
+    rf.readline() # Skip header
+    
+    next_anom = get_next_anom(rf)
+    while next_anom[0] < start:
+        next_anom = get_next_anom(rf)
+
+
+    scan_prog = tqdm(desc='Finding start', total=start-cur_slice-1)
+    prog = tqdm(desc='Seconds read', total=end-start-1)
+    keep_reading = True
+
+    line = in_f.readline()
+    curtime = fmt_line(line.split(','))[0]
+    old_ts = curtime 
+    while keep_reading:
+        while line:
+            l = line.split(',')
+            
+            # Scan to the correct part of the file
+            ts = int(l[0])
+            if ts < start:
+                line = in_f.readline()
+                scan_prog.update(ts-old_ts)
+                old_ts = ts 
+                curtime = ts 
+                continue
+            
+            ts, src, dst = fmt_line(l)
+
+            if ts >= end:
+                keep_reading = False 
+                break 
+            
+            # Skip self-loops
+            if src == dst:
+                line = in_f.readline()
+                continue
+
+            # Not totally necessary but I like the loading bar
+            prog.update(ts-old_ts)
+            old_ts = ts
+
+            # Add edge
+            srcs.append(src)
+            dsts.append(dst)
+
+            # Add label
+            if ts == next_anom[0] and is_anomalous(src, dst, next_anom):
+                ys.append(1)
+                next_anom = get_next_anom(rf)
+
+            else:
+                ys.append(0)
+
+            line = in_f.readline()
+
+        in_f.close() 
+        cur_slice += FILE_DELTA 
+
+        if os.path.exists(LANL_FOLDER + str(cur_slice) + '.txt'):
+            in_f = open(LANL_FOLDER + str(cur_slice) + '.txt', 'r')
+            line = in_f.readline()
+        else:
+            keep_reading=False
+            break
+        
+    rf.close() 
+    scan_prog.close()
+    prog.close()
+
+    edges = torch.tensor([srcs, dsts])
+    ys = torch.tensor(ys)
+
+    return edges, ys
+
+
 if __name__ == '__main__':
     data = load_lanl_dist(2, start=0, end=21600, delta=21600)
     print(data)

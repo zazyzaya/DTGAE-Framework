@@ -129,8 +129,11 @@ class DynamicRecurrent(DTGAE_Recurrent):
             ) for i in range(self.num_workers)
         ]
 
+        # Remove labels for edgelist 0 as it has no embeddings 
+        # it can be compared to 
+        ys[0] = ys[0][1:]
         scores = torch.cat(scores, dim=0)
-        ys = torch.cat(sum(ys[1:], []), dim=0)
+        ys = torch.cat(sum(ys, []), dim=0)
 
         print(scores.size())
         print(ys.size())

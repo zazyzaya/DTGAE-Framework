@@ -44,6 +44,12 @@ class DTGAE_Encoder(DDP):
         return self.module.data.__getattribute__(field)
 
     '''
+    Run an arbitrary function using this machine
+    '''
+    def run_arbitrary_fn(self, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    '''
     Given a single edge list and embeddings, return the dot product
     likelihood of each edge
     '''

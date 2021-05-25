@@ -83,6 +83,11 @@ def get_args():
     )
 
     ap.add_argument(
+        '--single',
+        action='store_true'
+    )
+
+    ap.add_argument(
         '--pred', '-p',
         action='store_true'
     )
@@ -130,7 +135,8 @@ if __name__ == '__main__':
             args.delta,
             args.load,
             args.fpweight,
-            not args.pred
+            not args.pred,
+            args.single
         )
         for _ in range(args.tests)
     ]

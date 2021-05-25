@@ -1,7 +1,10 @@
 import torch 
 from torch import nn 
-from torch.distributed import rpc 
+from torch.nn import functional as F
+from torch.distributed import rpc
+from torch.distributed.rpc.api import get_worker_info 
 from torch_geometric.nn import GCNConv, GATConv, SAGEConv
+from torch_geometric.nn.conv.message_passing import MessagePassing
 
 from .dist_framework import DTGAE_Embed_Unit
 from .dist_static import StaticEncoder
@@ -42,9 +45,11 @@ class GCN(DTGAE_Embed_Unit):
             # with. May as well use some inter-op threads if we have em
             zs.append(
                 torch.jit._fork(self.forward_once, mask_enum, i)
+                #self.forward_once(mask_enum, i)
             )
 
         return torch.stack([torch.jit._wait(z) for z in zs])
+        #return torch.stack(zs)
 
     
     def forward_once(self, mask_enum, i):
@@ -80,6 +85,7 @@ def dynamic_gcn_rref(loader, kwargs, h_dim, z_dim, head=False):
     return DynamicEncoder(
         GCN(loader, kwargs, h_dim, z_dim), head
     )
+
 
 
 class GAT(GCN):
@@ -118,15 +124,40 @@ def dynamic_gat_rref(loader, kwargs, h_dim, z_dim, head=False):
     )
 
 
-'''
-Inherits from GAT because also doesn't use edge weights
-'''
-class SAGE(GAT):
+class SAGE(GCN):
     def __init__(self, data_load, data_kws, h_dim, z_dim):
         super().__init__(data_load, data_kws, h_dim, z_dim)
 
-        self.c1 = SAGEConv(self.data.x_dim, h_dim)
-        self.c2 = SAGEConv(h_dim, h_dim)
+        # For layer 1 we can mult the features with W before 
+        # we message pass, because we know all inputs are 1-hot
+        # vectors and we're doing max pooling. 
+        del self.c1 
+        self.mp = MessagePassing(aggr='max')
+        self.e_lin = nn.Linear(self.data.x_dim, h_dim)
+        self.r_lin = nn.Linear(self.data.x_dim, h_dim)
+
+        self.c2 = SAGEConv(h_dim, h_dim, aggr='max')
+
+    def forward_once(self, mask_enum, i):
+        ei = self.data.ei_masked(mask_enum, i)
+        x = self.data.xs if not self.data.dynamic_feats \
+            else self.data.xs[i]
+
+        # Conv 1 we do the GCN way, multiplying feats to the weights
+        # before they are propogated. This saves time, and is equiv 
+        # to doing it the other way around so long as we max pool
+        x_e = self.e_lin(x)
+        x_e = self.mp.propagate(ei, x=x_e, size=None)
+        x_r = self.r_lin(x)
+        x = x_r + x_e
+        x = F.normalize(x, p=2., dim=-1)
+
+        x = self.relu(x)
+        x = self.drop(x)
+        x = self.c2(x, ei)
+
+        return self.tanh(x)
+
 
 def static_sage_rref(loader, kwargs, h_dim, z_dim, **kws):
     return StaticEncoder(
