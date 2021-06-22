@@ -54,7 +54,27 @@ def normalized(ew_ts):
 
     return ews
 
-def load_lanl_dist(workers, start=0, end=635015, delta=8640, is_test=False, ew_fn=std_edge_w):
+def standardized(ew_ts):
+    ews = []
+    for ew_t in ew_ts:
+        ew_t = torch.tensor(ew_t, dtype=torch.float)
+        ew_t = (ew_t - ew_t.mean()) / ew_t.std()
+        ew_t = torch.sigmoid(ew_t)
+        ews.append(ew_t)
+
+    return ews
+
+def inv_standardized(ew_ts):
+    ews = []
+    for ew_t in ew_ts:
+        ew_t = torch.tensor(ew_t, dtype=torch.float)
+        ew_t = (ew_t - ew_t.mean()) / ew_t.std()
+        ew_t = 1-torch.sigmoid(ew_t)
+        ews.append(ew_t)
+
+    return ews
+
+def load_lanl_dist(workers, start=0, end=635015, delta=8640, is_test=False, ew_fn=standardized):
     if start == None or end == None:
         return empty_lanl()
 
@@ -111,9 +131,6 @@ def load_lanl_dist(workers, start=0, end=635015, delta=8640, is_test=False, ew_f
     else:
         ys = None
 
-    assert len(eis) == sum(per_worker), \
-        "Something went wrong. Too many, or too few edge lists in reduced object"
-
     # After everything is combined, wrap it in a fancy new object, and you're
     # on your way to coolsville flats
     print("Done")
@@ -148,7 +165,7 @@ def make_data_obj(eis, ys, ew_fn, ews=None, **kwargs):
             feats[i][SPEC] = 1
 
     # That's not much info, so add in NIDs as well
-    x = torch.cat([feats, torch.eye(cl_cnt+1)], dim=1)
+    x = torch.cat([torch.eye(cl_cnt+1), feats], dim=1)
     
     # Build time-partitioned edge lists
     eis_t = []
@@ -176,7 +193,7 @@ def make_data_obj(eis, ys, ew_fn, ews=None, **kwargs):
 Equivilant to load_cyber.load_lanl but uses the sliced LANL files 
 for faster scanning to the correct lines
 '''
-def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn=std_edge_w):
+def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn=standardized):
     cur_slice = start - (start % FILE_DELTA)
     start_f = str(cur_slice) + '.txt'
     in_f = open(LANL_FOLDER + start_f, 'r')
@@ -234,6 +251,7 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
 
     anom_marked = False
     keep_reading = True
+    next_split = start+delta 
 
     line = in_f.readline()
     curtime = fmt_line(line.split(','))[0]
@@ -259,8 +277,7 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
             old_ts = ts
 
             # Split edge list if delta is hit 
-            # (assumes no missing timesteps in the log files)
-            if (curtime != ts and (curtime-ts) % delta == 0) or ts >=end:
+            if ts >= next_split:
                 if len(edges_t):
                     ei = list(zip(*edges_t.keys()))
                     edges.append(ei)
@@ -274,7 +291,8 @@ def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn
                     edges_t = {}
 
                 # If the list was empty, just keep going if you can
-                curtime = ts 
+                curtime = next_split 
+                next_split += delta
 
                 # Break out of loop after saving if hit final timestep
                 if ts >= end:

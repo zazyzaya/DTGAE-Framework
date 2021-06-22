@@ -1,10 +1,11 @@
 import torch 
 from torch import nn 
 
-'''
-GRU Class; very simple and lightweight
-'''
+
 class GRU(nn.Module):
+    '''
+    GRU Class; very simple and lightweight
+    '''
     def __init__(self, x_dim, h_dim, z_dim, hidden_units=1):
         super(GRU, self).__init__()
 
@@ -30,13 +31,14 @@ class GRU(nn.Module):
         
         return self.lin(xs), h
 
-'''
-Slightly more complex RNN, but about equal at most tasks, though 
-some papers show that LSTM is better in some instances than GRU
 
-Best practice to use LSTM first, and if GRU performs as well to switch to that
-'''
 class LSTM(GRU):
+    '''
+    Slightly more complex RNN, but about equal at most tasks, though 
+    some papers show that LSTM is better in some instances than GRU
+
+    Best practice to use LSTM first, and if GRU performs as well to switch to that
+    '''
     def __init__(self, x_dim, h_dim, z_dim, hidden_units=1):
         super(LSTM, self).__init__(x_dim, h_dim, z_dim, hidden_units=hidden_units)
 
@@ -44,3 +46,42 @@ class LSTM(GRU):
         self.rnn = nn.LSTM(
             x_dim, h_dim, num_layers=hidden_units
         )
+
+
+class Lin(nn.Module):
+    '''
+    Doesn't take time into account at all, just projects input
+    into the output dimension via MLP
+    '''
+    def __init__(self, x_dim, h_dim, z_dim, hidden_units=1):
+        super(Lin, self).__init__()
+
+        self.layers = nn.Sequential(
+            nn.Dropout(0.25),
+            nn.Linear(x_dim, h_dim),
+            nn.ReLU(),
+            nn.Dropout(0.25),
+            nn.Linear(h_dim, z_dim)
+        )
+
+    def forward(self, xs, h0, include_h=False):
+        if not include_h:
+            return self.layers(xs)
+        
+        return self.layers(xs), None
+
+
+class EmptyModel(nn.Module):
+    '''
+    Just returns the input, assumes dims are correctly
+    sized
+    '''
+    def __init__(self, x_dim, h_dim, z_dim, hidden_units=1):
+        super(EmptyModel, self).__init__()
+        self.id = nn.Identity()
+
+    def forward(self, xs, h0, include_h=False):
+        if not include_h:
+            return self.id(xs)
+        
+        return self.id(xs), None

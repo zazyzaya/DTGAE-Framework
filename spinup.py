@@ -34,8 +34,8 @@ WORKER_ARGS = [32,32]
 RNN_ARGS = [32,32,16,1]
 
 WORKERS=4
-W_THREADS=2
-M_THREADS=1
+W_THREADS=1
+M_THREADS=2
 
 TMP_FILE = 'tmp.dat'
 
@@ -61,22 +61,27 @@ def get_work_units(num_workers, start, end, delta, isTe):
 
     # Only uncomment when running late at night
     # Don't be a thread-hog, fucko
-    global W_THREADS
-    W_THREADS = W_THREADS*2 if isTe else W_THREADS
+    load_threads = W_THREADS*2 if isTe else W_THREADS
+
+    # Make sure workers are collectively using at least 8 threads
+    # since loading the data takes forever otherwise
+    min_threads = min(8, load_threads*num_workers)
+    t_per_worker = max(1, min_threads//num_workers)
 
     print("Tasks: %s" % str(per_worker))
     kwargs = []
     prev = start
+    end_t = min(prev + delta*per_worker[0], end)
     for i in range(num_workers):
-            end_t = min(prev + delta*per_worker[i], end)
             kwargs.append({
                 'start': prev,
                 'end': end_t,
                 'delta': delta, 
                 'is_test': isTe,
-                'jobs': min(W_THREADS, 8)
+                'jobs': t_per_worker
             })
-            prev = end_t
+            prev = end_t + 1
+            end_t = min(prev-1 + delta*per_worker[i], end)
 
     return kwargs
     
@@ -113,7 +118,7 @@ def init_empty_workers(num_workers, worker_constructor, worker_args):
     return rrefs
 
 def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, worker_args, 
-                times, just_test, fw, static, single_emb, tr_args=DEFAULTS):
+                times, just_test, fw, static, single_emb, run_speed_test, tr_args=DEFAULTS):
     # DDP info
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '42069'
@@ -137,18 +142,25 @@ def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, 
             rpc_backend_options=rpc_backend_options
         )
 
-        if not just_test:
-            rrefs = init_workers(
+        # Speed test doesn't need to train the model, 
+        # just use random state it starts with and check 
+        # how long it takes to run, then return that data
+        if run_speed_test:
+            rrefs = init_empty_workers(
                 world_size-1, 
-                times['tr_start'], times['tr_end'], times['delta'], False,
                 worker_constructor, worker_args
             )
 
-            model, h0, tpe = train(rrefs, tr_args, rnn_constructor, rnn_args, static)
+            rnn = rnn_constructor(*rnn_args)
+            model = StaticRecurrent(rnn, rrefs) if static\
+                else DynamicRecurrent(rnn, rrefs)
 
-        else:
-            # TODO make it possible to construct rrefs without
-            # loading data
+            stats = speed_test(model, rrefs, times)
+            stats['delta'] = times['delta']
+
+
+        # Evaluating a pre-trained model, so no need to train 
+        elif just_test:
             rrefs = init_empty_workers(
                 world_size-1, 
                 worker_constructor, worker_args
@@ -163,19 +175,29 @@ def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, 
             h0 = states['h0']
             tpe = 0
 
-        h0, zs = get_cutoff(model, h0, times, tr_args, fw)
-        
-        if single_emb:
-            stats = test_single_embed(zs, rrefs, times, model.cutoff)
-        else:
-            stats = test(model, h0, times, rrefs)
 
-        stats['TPE'] = tpe
+        # Building and training a fresh model
+        else:
+            rrefs = init_workers(
+                world_size-1, 
+                times['tr_start'], times['tr_end'], times['delta'], False,
+                worker_constructor, worker_args
+            )
+
+            model, h0, tpe = train(rrefs, tr_args, rnn_constructor, rnn_args, static)
+
+        if not run_speed_test:
+            h0, zs = get_cutoff(model, h0, times, tr_args, fw)
+            
+            if single_emb:
+                stats = test_single_embed(zs, rrefs, times, model.cutoff)
+            else:
+                stats = test(model, h0, times, rrefs)
+
+            stats['TPE'] = tpe
 
     # Slaves
     else:
-        # If there are 4 workers, give them each 4 threads 
-        # (Total 16 is equal to serial model)
         torch.set_num_threads(W_THREADS)
         
         # Slaves are their own process group. This allows
@@ -352,7 +374,7 @@ def test(model, h0, times, rrefs):
     with torch.no_grad():
         model.eval()
         s = time.time()
-        zs = model(TData.TEST, h0=h0, no_grad=True)
+        zs = model.forward(TData.TEST, h0=h0, no_grad=True)
         ctime = time.time()-s
 
     # Scores all edges and matches them with name/timestamp
@@ -479,10 +501,50 @@ def test_single_embed(zs, rrefs, times, cutoff):
     }
 
 
+def speed_test(model, rrefs, times):
+    Encoder = StaticEncoder if isinstance(model, StaticRecurrent) \
+        else DynamicEncoder
+
+    # Load train data into workers
+    ld_args = get_work_units(
+        len(rrefs), 
+        times['tr_start'], 
+        times['te_end'],
+        times['delta'], 
+        False
+    )
+
+    print("Loading test data")
+    futs = [
+        _remote_method_async(
+            Encoder.load_new_data,
+            rrefs[i], 
+            ld.load_lanl_dist, 
+            ld_args[i]
+        ) for i in range(len(rrefs))
+    ]
+
+    # Wait until all workers have finished
+    [f.wait() for f in futs]
+
+    print("Running model")
+    with torch.no_grad():
+        model.eval()
+        s = time.time()
+        zs = model.forward(TData.ALL, no_grad=True)
+        elapsed = time.time() - s    
+    
+    timesteps = zs.size(0)
+    return {
+        'workers': len(rrefs),
+        'time': elapsed,
+        'timesteps': timesteps
+    }
+
 
 def run_all(workers, rnn_constructor, rnn_args, worker_constructor, 
             worker_args, delta, just_test, fw, static, single_emb,
-            te_end=None):
+            run_speed_test, te_end=None):
     '''
     Starts up proceses, trains validates and tests the model given 
     the inputs 
@@ -515,9 +577,13 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
         #te_end = 740104 # First 100 anoms
         #te_end = 1089597 # First 500 anoms
         te_end = 5011199  # Full
+    
+    else:
+        te_end = min(te_end * delta, 5011199)
 
-    max_workers = (tr_end-tr_start) // delta
-    workers = min(max_workers, workers)
+    if not run_speed_test:
+        max_workers = (tr_end-tr_start) // delta
+        workers = min(max_workers, workers)
 
     # Let timesteps overlap for dynamic as it never
     # runs loss on the last time step during training
@@ -547,7 +613,8 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
             just_test,
             fw,
             static,
-            single_emb
+            single_emb,
+            run_speed_test
         ),
         nprocs=world_size,
         join=True
@@ -557,6 +624,7 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
     stats = pickle.load(open(TMP_FILE, 'rb'))
     os.remove(TMP_FILE)
 
+    print(stats)
     return stats
 
 if __name__ == '__main__':

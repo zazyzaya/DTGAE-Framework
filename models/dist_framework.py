@@ -133,7 +133,6 @@ class DTGAE_Recurrent(nn.Module):
                 f.wait(),
                 h0, include_h=True
             )
-
             zs.append(z)
         
         #zs = [f.wait() for f in futs]
