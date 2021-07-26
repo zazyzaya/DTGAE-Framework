@@ -1,0 +1,126 @@
+<class 'models.serial_models.VGRNN'>
+0.5	32
+delta    1800.000000
+size       32.000000
+time        4.596388
+dtype: float64
+
+<class 'models.serial_models.VGRNN'>
+0.5	64
+delta    1800.000000
+size       64.000000
+time        8.377866
+dtype: float64
+
+<class 'models.serial_models.VGRNN'>
+0.5	128
+delta    1800.000000
+size      128.000000
+time       16.810775
+dtype: float64
+
+<class 'models.serial_models.VGRNN'>
+0.5	256
+delta    1800.000000
+size      256.000000
+time       33.024035
+dtype: float64
+
+<class 'models.serial_models.VGRNN'>
+0.5	512
+delta    1800.000000
+size      512.000000
+time       69.249908
+dtype: float64
+
+<class 'models.serial_models.VGRNN'>
+0.5	1024
+delta    1800.000000
+size     1024.000000
+time      143.204096
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_H'>
+0.5	32
+delta    1800.000000
+size       32.000000
+time       14.165982
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_H'>
+0.5	64
+delta    1800.000000
+size       64.000000
+time       24.905016
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_H'>
+0.5	128
+delta    1800.000000
+size      128.000000
+time       42.721181
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_H'>
+0.5	256
+delta    1800.000000
+size      256.000000
+time       82.101168
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_H'>
+0.5	512
+delta    1800.000000
+size      512.000000
+time      145.625491
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_H'>
+0.5	1024
+delta    1800.000000
+size     1024.000000
+time      280.417305
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_O'>
+0.5	32
+delta    1800.000000
+size       32.000000
+time       13.739517
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_O'>
+0.5	64
+delta    1800.000000
+size       64.000000
+time       30.954957
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_O'>
+0.5	128
+delta    1800.000000
+size      128.000000
+time       58.758191
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_O'>
+0.5	256
+delta    1800.000000
+size      256.000000
+time      118.785138
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_O'>
+0.5	512
+delta    1800.000000
+size      512.000000
+time     3133.418872
+dtype: float64
+
+<class 'models.serial_models.SparseEGCN_O'>
+0.5	1024
+delta    1800.000000
+size     1024.000000
+time     3145.271028
+dtype: float64
+

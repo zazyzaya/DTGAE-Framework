@@ -38,6 +38,12 @@ class DTGAE_Encoder(DDP):
         return True
 
     '''
+    Calls get repr on data object
+    '''
+    def get_repr(self, scores, delta=1):
+        return self.module.data.get_val_repr(scores, delta=delta)
+
+    '''
     Return some field from this worker's data object
     '''
     def get_data_field(self, field):

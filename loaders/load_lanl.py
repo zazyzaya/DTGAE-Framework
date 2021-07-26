@@ -74,7 +74,7 @@ def inv_standardized(ew_ts):
 
     return ews
 
-def load_lanl_dist(workers, start=0, end=635015, delta=8640, is_test=False, ew_fn=standardized):
+def load_lanl_dist(workers, start=0, end=635015, delta=8640, is_test=False, ew_fn=std_edge_w):
     if start == None or end == None:
         return empty_lanl()
 
@@ -194,7 +194,7 @@ Equivilant to load_cyber.load_lanl but uses the sliced LANL files
 for faster scanning to the correct lines
 '''
 def load_partial_lanl(start=140000, end=156659, delta=8640, is_test=False, ew_fn=standardized):
-    cur_slice = start - (start % FILE_DELTA)
+    cur_slice = int(start - (start % FILE_DELTA))
     start_f = str(cur_slice) + '.txt'
     in_f = open(LANL_FOLDER + start_f, 'r')
 

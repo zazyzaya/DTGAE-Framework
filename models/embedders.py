@@ -25,7 +25,6 @@ class GCN(DTGAE_Embed_Unit):
         )
 
         self.data = data_load(data_kws.pop("jobs"), **data_kws)
-        
 
         # Params 
         self.c1 = GCNConv(self.data.x_dim, h_dim, add_self_loops=True)

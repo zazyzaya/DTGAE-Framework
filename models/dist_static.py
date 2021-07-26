@@ -90,7 +90,7 @@ class StaticRecurrent(DTGAE_Recurrent):
             )
             start = end 
 
-        scores = sum([f.wait() for f in futs], [])
+        scores = [f.wait() for f in futs]
         ys = [
             _remote_method(
                 StaticEncoder.get_data_field,
@@ -98,12 +98,6 @@ class StaticRecurrent(DTGAE_Recurrent):
                 'ys'
             ) for i in range(self.num_workers)
         ]
-
-        scores = torch.cat(scores, dim=0)
-        ys = torch.cat(sum(ys, []), dim=0)
-
-        print(scores.size())
-        print(ys.size())
 
         return scores, ys
 

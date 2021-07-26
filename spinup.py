@@ -21,7 +21,7 @@ from models.recurrent import GRU
 from utils import get_score, get_optimal_cutoff, get_f1
 
 DEFAULTS = {
-    'lr': 0.001,
+    'lr': 0.01,
     'epochs': 1500,
     'min': 1,
     'patience': 5,
@@ -38,6 +38,12 @@ W_THREADS=1
 M_THREADS=2
 
 TMP_FILE = 'tmp.dat'
+SCORE_FILE = 'scores.txt'
+
+# Callable that returns TData object
+# method signature must match
+# workers: int, start=int, end=int, delta=int, is_test=bool 
+LOAD_FN = None
 
 torch.set_num_threads(1)
 
@@ -62,6 +68,7 @@ def get_work_units(num_workers, start, end, delta, isTe):
     # Only uncomment when running late at night
     # Don't be a thread-hog, fucko
     load_threads = W_THREADS*2 if isTe else W_THREADS
+    #load_threads = W_THREADS
 
     # Make sure workers are collectively using at least 8 threads
     # since loading the data takes forever otherwise
@@ -95,7 +102,7 @@ def init_workers(num_workers, start, end, delta, isTe, worker_constructor, worke
             rpc.remote(
                 'worker'+str(i),
                 worker_constructor,
-                args=(ld.load_lanl_dist, kwargs[i], *worker_args),
+                args=(LOAD_FN, kwargs[i], *worker_args),
                 kwargs={'head': i==0}
             )
         )
@@ -109,7 +116,7 @@ def init_empty_workers(num_workers, worker_constructor, worker_args):
         rpc.remote(
             'worker'+str(i),
             worker_constructor,
-            args=(ld.load_lanl_dist, empty, *worker_args),
+            args=(LOAD_FN, empty, *worker_args),
             kwargs={'head': i==0}
         )
         for i in range(num_workers)
@@ -118,7 +125,8 @@ def init_empty_workers(num_workers, worker_constructor, worker_args):
     return rrefs
 
 def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, worker_args, 
-                times, just_test, fw, static, single_emb, run_speed_test, tr_args=DEFAULTS):
+                times, just_test, fw, static, single_emb, run_speed_test, load_fn, manual, 
+                tr_args=DEFAULTS):
     # DDP info
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '42069'
@@ -127,15 +135,14 @@ def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, 
     rpc_backend_options = rpc.TensorPipeRpcBackendOptions()
     rpc_backend_options.init_method='tcp://localhost:42068'
 
+    # This is a lot easier than actually changing it in all the methods
+    # at this point
+    global LOAD_FN
+    LOAD_FN = load_fn
+
     # Master (RNN module)
     if rank == world_size-1:
         torch.set_num_threads(M_THREADS)
-
-        # Master gets 16 threads and 4x4 threaded workers
-        # In theory, only 16 threads should run at a time while
-        # master sleeps, waiting on worker procs
-        #torch.set_num_threads(16)
-
         rpc.init_rpc(
             'master', rank=rank, 
             world_size=world_size,
@@ -192,7 +199,7 @@ def init_procs(rank, world_size, rnn_constructor, rnn_args, worker_constructor, 
             if single_emb:
                 stats = test_single_embed(zs, rrefs, times, model.cutoff)
             else:
-                stats = test(model, h0, times, rrefs)
+                stats = test(model, h0, times, rrefs, manual=manual)
 
             stats['TPE'] = tpe
 
@@ -305,7 +312,7 @@ def get_cutoff(model, h0, times, kwargs, fw):
     _remote_method(
         Encoder.load_new_data,
         model.gcns[0],
-        ld.load_lanl_dist,
+        LOAD_FN,
         {
             'start': times['tr_end'],
             'end': times['val_end'],
@@ -342,7 +349,7 @@ def get_cutoff(model, h0, times, kwargs, fw):
     return h0, zs[-1]
 
 
-def test(model, h0, times, rrefs):
+def test(model, h0, times, rrefs, manual=False):
     # For whatever reason, it doesn't know what to do if you call
     # the parent object's methods. Kind of defeats the purpose of 
     # using OOP at all IMO, but whatever
@@ -363,7 +370,7 @@ def test(model, h0, times, rrefs):
         _remote_method_async(
             Encoder.load_new_data,
             rrefs[i], 
-            ld.load_lanl_dist, 
+            LOAD_FN, 
             ld_args[i]
         ) for i in range(len(rrefs))
     ]
@@ -380,6 +387,37 @@ def test(model, h0, times, rrefs):
     # Scores all edges and matches them with name/timestamp
     print("Scoring")
     scores, labels = model.score_all(zs)
+
+    if manual:
+        labels = [
+            _remote_method_async(
+                Encoder.get_repr,
+                rrefs[i],
+                scores[i], 
+                delta=times['delta']
+            )
+            for i in range(len(rrefs))
+        ]
+        labels = sum([l.wait() for l in labels], [])
+        labels.sort(key=lambda x : x[0])
+
+        with open(SCORE_FILE, 'w+') as f:
+            cutoff_hit = False
+            for l in labels:
+                f.write(str(l[0].item()))
+                f.write('\t')
+                f.write(l[1])
+                f.write('\n')
+
+                if l[0] >= model.cutoff and not cutoff_hit:
+                    f.write('-'*100 + '\n')
+                    cutoff_hit = True
+
+        return {}
+
+    scores = torch.cat(sum(scores, []), dim=0)
+    labels = torch.cat(sum(labels, []), dim=0)
+
     anoms = scores[labels==1].sort()[0]
 
     # Classify using cutoff from earlier
@@ -420,7 +458,10 @@ def test(model, h0, times, rrefs):
         'FwdTime':ctime
     }
 
-
+'''
+Requires using LANL. This was just for testing, so leaving it as is, 
+but will error if trained on non-LANL data
+'''
 def test_single_embed(zs, rrefs, times, cutoff):
     # Load train data into workers
     ld_args = get_work_units(
@@ -519,7 +560,7 @@ def speed_test(model, rrefs, times):
         _remote_method_async(
             Encoder.load_new_data,
             rrefs[i], 
-            ld.load_lanl_dist, 
+            LOAD_FN, 
             ld_args[i]
         ) for i in range(len(rrefs))
     ]
@@ -544,7 +585,7 @@ def speed_test(model, rrefs, times):
 
 def run_all(workers, rnn_constructor, rnn_args, worker_constructor, 
             worker_args, delta, just_test, fw, static, single_emb,
-            run_speed_test, te_end=None):
+            run_speed_test, load_fn, tr_start, tr_end, manual, te_end=None):
     '''
     Starts up proceses, trains validates and tests the model given 
     the inputs 
@@ -562,8 +603,8 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
     # Convert to hours
     delta = int(60**2 * delta)
 
-    tr_start=0
-    tr_end=ld.DATE_OF_EVIL_LANL
+    #tr_start=0
+    #tr_end=ld.DATE_OF_EVIL_LANL
     
     # Need at least 2 deltas; default to 5% of tr data if that's enough
     val = max((tr_end - tr_start) // 20, delta*2)
@@ -579,11 +620,12 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
         te_end = 5011199  # Full
     
     else:
-        te_end = min(te_end * delta, 5011199)
+        te_end = min(te_end * delta, 5011199) if run_speed_test \
+            else te_end
 
     if not run_speed_test:
-        max_workers = (tr_end-tr_start) // delta
-        workers = min(max_workers, workers)
+        max_workers = int((tr_end-tr_start) // delta)
+        workers = max(min(max_workers, workers), 1)
 
     # Let timesteps overlap for dynamic as it never
     # runs loss on the last time step during training
@@ -598,6 +640,8 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
         'te_end': te_end,
         'delta': delta
     }
+
+    print(times)
 
     # Start workers
     world_size = workers+1
@@ -614,7 +658,9 @@ def run_all(workers, rnn_constructor, rnn_args, worker_constructor,
             fw,
             static,
             single_emb,
-            run_speed_test
+            run_speed_test,
+            load_fn,
+            manual
         ),
         nprocs=world_size,
         join=True

@@ -120,7 +120,7 @@ class DynamicRecurrent(DTGAE_Recurrent):
             )
             start = end 
 
-        scores = sum([f.wait() for f in futs], [])
+        scores = [f.wait() for f in futs]
         ys = [
             _remote_method(
                 DynamicEncoder.get_data_field,
@@ -132,15 +132,6 @@ class DynamicRecurrent(DTGAE_Recurrent):
         # Remove labels for edgelist 0 as it has no embeddings 
         # it can be compared to 
         ys[0] = ys[0][1:]
-        scores = torch.cat(scores, dim=0)
-        ys = torch.cat(sum(ys, []), dim=0)
-
-        print(scores.size())
-        print(ys.size())
-        print(
-            torch.stack([ys[:10], scores[:10]], dim=1)
-        )
-
         return scores, ys
 
 

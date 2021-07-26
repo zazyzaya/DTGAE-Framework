@@ -5,12 +5,17 @@ import torch
 
 '''
 Returns AUC and AP scores given true and false scores
+Specialized for when close to 0 implies alert, so scores are 1-score
+nscore == Not anomalous
+pscore == is anomalous 
+
+(don't get mixed up with positive edge/negative edge)
 '''
-def get_score(pscore, nscore):
+def get_score(nscore, pscore):
     ntp = pscore.size(0)
     ntn = nscore.size(0)
 
-    score = torch.cat([pscore, nscore]).numpy()
+    score = (1-torch.cat([pscore, nscore])).numpy()
     labels = np.zeros(ntp + ntn, dtype=np.long)
     labels[:ntp] = 1
 

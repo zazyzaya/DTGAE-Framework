@@ -2,6 +2,9 @@ from argparse import ArgumentParser
 
 import pandas as pd
 
+import loaders.load_lanl as lanl
+import loaders.load_pico as pico
+
 from models.recurrent import GRU, LSTM, Lin, EmptyModel
 from models.embedders import \
     static_gcn_rref, static_gat_rref, static_sage_rref, static_gin_rref,\
@@ -98,13 +101,41 @@ def get_args():
         default=-1
     )
 
+    ap.add_argument(
+        '--dataset',
+        default='LANL', 
+        type=str.upper,
+        choices=['LANL', 'L', 'PICO', 'P']
+    )
+
     args = ap.parse_args()
+    args.te_end = None
     assert args.fpweight >= 0 and args.fpweight <=1, '--fpweight must be a value between 0 and 1 (inclusive)'
 
     readable = str(args)
     print(readable)
 
     static = not args.pred
+    
+    # Parse dataset info 
+    if args.dataset.startswith('L'):
+        args.loader = lanl.load_lanl_dist
+        args.tr_start = 0
+        args.tr_end = lanl.DATE_OF_EVIL_LANL
+        args.manual = False 
+
+    elif args.dataset.startswith('P'):
+        args.loader = pico.load_pico
+        args.tr_start = pico.PICO_START
+        args.tr_end = pico.DATE_OF_EVIL_PICO
+        args.te_end = pico.PICO_END
+        args.manual = True
+
+    # The checking in argparse should never allow it to
+    # reach this else block, but just in case
+    else:
+        print("Dataset %s not implimented" % args.dataset)
+        exit()
 
     # Convert from str to function pointer
     if args.encoder == 'GCN':
@@ -144,7 +175,7 @@ if __name__ == '__main__':
 
     st_d = args.speedtest
     st = True if st_d > 0 else False
-    st_d = st_d if st else None
+    te_end = st_d if st else args.te_end
 
     stats = [
         run_all(
@@ -159,7 +190,11 @@ if __name__ == '__main__':
             not args.pred,
             args.single,
             st,
-            te_end=st_d
+            args.loader, 
+            args.tr_start,
+            args.tr_end,
+            args.manual, 
+            te_end=te_end
         )
         for _ in range(args.tests)
     ]

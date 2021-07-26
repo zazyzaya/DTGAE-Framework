@@ -12,7 +12,7 @@ class TData(Data):
     TEST = 2
     ALL = 2
 
-    def __init__(self, eis, xs, ys, masks, ews=None, **kwargs):
+    def __init__(self, eis, xs, ys, masks, ews=None, nmap=None, **kwargs):
         super(TData, self).__init__(**kwargs)
         
         # Required fields for models to use this 
@@ -24,6 +24,7 @@ class TData(Data):
         self.ews = ews 
         self.ys = ys 
         self.is_test = not isinstance(ys, None.__class__)
+        self.nmap = nmap
 
         # Makes finding sizes of positive samples a little easier
         self.ei_sizes = [
@@ -85,6 +86,27 @@ class TData(Data):
 
         return negs
 
+    def get_val_repr(self, scores, delta=1):
+        pairs = []
+        for i in range(len(scores)):
+            score = scores[i]
+            ei = self.eis[i]
+
+            for j in range(ei.size(1)):
+                if self.nmap is not None:
+                    src, dst = self.nmap[ei[0,j]], self.nmap[ei[1,j]]
+                else: 
+                    src, dst = ei[0,j], ei[1,j]
+                if self.hr: 
+                    ts = self.hr[i]
+                else:
+                    ts = '%d-%d' % (i*delta, (i+1)*delta)
+
+                s = '%s\t%s\t%s' % (src, dst, ts)
+                pairs.append((score[j], s))
+
+        pairs.sort(key=lambda x : x[0])
+        return pairs
 
 '''
 Uses Kipf-Welling pull #25 to quickly find negative edges
