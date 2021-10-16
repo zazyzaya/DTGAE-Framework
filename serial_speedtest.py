@@ -1,8 +1,10 @@
 from time import time 
 
 import torch
+from torch.optim import Adam
 import pandas as pd
 
+from loaders.tdata import TData 
 from loaders.load_lanl import load_lanl_dist as ld 
 from models.serial_models import \
     VGRNN, \
@@ -20,14 +22,31 @@ def load_and_eval(constructor, delta, size, data=None):
         data = ld(8, start=0, end=delta*size, delta=delta)
 
     model = constructor(data.x_dim, 32, 16, pred=False)
-    
+    opt = Adam(model.parameters(), lr=0.01)
+
     print("Started... ", end='')
     start = time() 
-    model.forward(data, data.ALL)
+    zs = model.forward(data, data.ALL)
     elapsed = time() - start 
     print("Finished %0.4f" % elapsed)
 
-    return {'delta': delta, 'size': size, 'time': elapsed}
+    print("Started loss...", end='')
+    start = time() 
+    p = [data.ei_masked(TData.TRAIN, i) for i in range(data.T)]
+    n = data.get_negative_edges(TData.TRAIN, nratio=10)
+    loss = model.calc_loss(p,n,zs)
+    ltime = time() - start
+    print("Finished %0.4f" % ltime)
+
+    print("Started backward... ")
+    start = time() 
+    loss.backward()
+    opt.step()
+    btime = time() - start
+    print("Finished %0.4f" % btime)
+    
+
+    return {'delta': delta, 'size': size, 'time': elapsed, 'loss_time': ltime, 'back_time': btime}
 
 
 OUT_F = 'results/speedtest_vgrnn.txt'
@@ -50,7 +69,7 @@ def test(models, sizes, tests, d=0.5):
 
 if __name__ == '__main__': 
     test(
-        [EGCN_H, EGCN_O],
+        [VGRNN, EGCN_H, EGCN_O],
         [32,64,128,256,512,1024],
         5
     )
